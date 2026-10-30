@@ -15,6 +15,7 @@ Crée un conteneur LXC Debian prêt pour du développement Java / Spring / Mongo
 | Docker | Docker CE, `docker compose`, buildx — utilisable sans sudo |
 | MongoDB | Conteneur Docker `mongo` sur `127.0.0.1:27017`, mot de passe root aléatoire ; `mongosh` est un wrapper vers celui de l'image, connecté par défaut |
 | Git / GitHub | git, git-lfs, GitHub CLI ; authentification par token et clonage d'un dépôt en option |
+| Jira (optionnel) | Variables `JIRA_*` exportées pour l'API REST Jira Cloud, accès vérifié à la création |
 | Claude Code | Installé pour l'utilisateur `dev`, avec un `~/.claude/CLAUDE.md` global (environnement + règles git) |
 | Remote Control | Service systemd `claude-rc` qui maintient une session tmux `claude-rc` exécutant `claude remote-control` |
 
@@ -47,6 +48,28 @@ GIT_NAME="Claude Bot" GIT_EMAIL=claude-bot@example.com \
 
 En mode interactif, les variables passées dans l'environnement deviennent les valeurs proposées par défaut.
 
+### Connexion à Jira
+
+Optionnelle. Créer un token d'API sur <https://id.atlassian.com/manage-profile/security/api-tokens>, puis répondre « oui » à l'étape Jira de l'assistant, ou passer les variables :
+
+```bash
+JIRA_URL=https://mon-org.atlassian.net \
+JIRA_EMAIL=moi@example.com \
+JIRA_API_TOKEN=xxx \
+JIRA_PROJECT=PROJ \
+./setup-claude-dev-lxc.sh
+```
+
+`JIRA_URL`, `JIRA_EMAIL` et `JIRA_API_TOKEN` vont ensemble : le script refuse de démarrer s'il en manque une. Elles sont écrites dans `~/.dev-env`, donc disponibles dans les shells de `dev` et pour Claude en Remote Control. Le `CLAUDE.md` global explique à Claude comment appeler l'API REST v3 avec ces variables. À la fin, le script appelle `/rest/api/3/myself` pour vérifier l'accès et affiche le résultat.
+
+Test manuel dans le conteneur :
+
+```bash
+curl -sS -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_URL/rest/api/3/myself" | jq .displayName
+```
+
+Le token donne les mêmes droits que le compte qui l'a créé : utiliser de préférence un compte dédié aux droits limités.
+
 ### Paramètres
 
 | Variable | Défaut | Rôle |
@@ -69,6 +92,10 @@ En mode interactif, les variables passées dans l'environnement deviennent les v
 | `GH_TOKEN` | — | Token GitHub (sinon `gh auth login` plus tard) |
 | `GH_REPO` | — | Dépôt `org/repo` à cloner dans `~/workspace` |
 | `GEN_SSH_KEY` | `auto` | Génère une clé SSH GitHub ; `auto` = seulement sans token |
+| `JIRA_URL` | — | Site Jira Cloud, ex. `https://mon-org.atlassian.net` |
+| `JIRA_EMAIL` | — | Email du compte Atlassian propriétaire du token |
+| `JIRA_API_TOKEN` | — | Token d'API Atlassian |
+| `JIRA_PROJECT` | — | Clé du projet Jira par défaut (optionnel) |
 | `RC_ENABLE` | `1` | Active le service Remote Control |
 | `RC_NAME` | nom d'hôte | Nom de la session dans claude.ai/code |
 | `RC_DIR` | `workspace` ou le dépôt cloné | Dossier de travail, relatif au home |
@@ -101,7 +128,7 @@ Relancer le service : `pct exec <CTID> -- systemctl restart claude-rc`
 | Chemin | Rôle |
 |---|---|
 | `~/infra/mongo/docker-compose.yml` | Définition du conteneur MongoDB |
-| `~/.dev-env` | `PATH`, `JAVA_HOME`, `SPRING_DATA_MONGODB_URI` (chargé par `.bashrc`) |
+| `~/.dev-env` | `PATH`, `JAVA_HOME`, `SPRING_DATA_MONGODB_URI`, variables `JIRA_*` (chargé par `.bashrc`) |
 | `~/.local/bin/mongosh` | Wrapper vers le `mongosh` de l'image Mongo |
 | `~/.claude/CLAUDE.md` | Instructions globales pour Claude |
 | `~/.claude-rc.env`, `~/bin/claude-rc-loop.sh` | Configuration et boucle Remote Control |
@@ -111,6 +138,7 @@ Relancer le service : `pct exec <CTID> -- systemctl restart claude-rc`
 
 - Le mot de passe MongoDB est stocké en clair dans `~/infra/mongo/docker-compose.yml` et `~/.dev-env` (chmod 600). Mongo n'écoute que sur `127.0.0.1`.
 - Le token GitHub transite par un fichier temporaire effacé avec `shred` ; il est ensuite géré par `gh`.
+- Le token Jira est stocké en clair dans `~/.dev-env` (chmod 600) et visible par Claude via l'environnement.
 - `dev` a sudo sans mot de passe : le conteneur est un environnement de dev, pas un serveur exposé.
 
 ### En cas d'échec

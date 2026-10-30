@@ -41,6 +41,12 @@ GH_TOKEN="${GH_TOKEN:-}"                  # token fine-grained (recommandé)
 GH_REPO="${GH_REPO:-}"                    # "org/repo" à cloner (optionnel)
 GEN_SSH_KEY="${GEN_SSH_KEY:-auto}"        # auto = seulement s'il n'y a pas de token
 
+# Jira Cloud (optionnel) — exporté dans ~/.dev-env pour l'API REST
+JIRA_URL="${JIRA_URL:-}"                  # ex: https://mon-org.atlassian.net
+JIRA_EMAIL="${JIRA_EMAIL:-}"              # compte Atlassian propriétaire du token
+JIRA_API_TOKEN="${JIRA_API_TOKEN:-}"      # https://id.atlassian.com/manage-profile/security/api-tokens
+JIRA_PROJECT="${JIRA_PROJECT:-}"          # clé du projet par défaut (optionnel)
+
 # Claude Code Remote Control
 RC_ENABLE="${RC_ENABLE:-1}"
 RC_NAME="${RC_NAME:-}"                    # vide = nom d'hôte
@@ -116,6 +122,20 @@ wizard() {
       GEN_SSH_KEY=1; else GEN_SSH_KEY=0; fi
   fi
 
+  # --- Jira ---
+  local jira_default="--defaultno"; [ -n "$JIRA_URL" ] && jira_default=""
+  if whiptail --backtitle "$BT" --title "Jira" $jira_default --yesno \
+     "Connecter le conteneur à Jira Cloud (API REST par token) ?" 12 72; then
+    JIRA_URL=$(w_input "Jira" "URL du site Jira :\n(ex : https://mon-org.atlassian.net)" "$JIRA_URL")
+    JIRA_EMAIL=$(w_input "Jira" "Email du compte Atlassian :" "$JIRA_EMAIL")
+    if [ -z "$JIRA_API_TOKEN" ]; then
+      JIRA_API_TOKEN=$(w_pass "Token Jira" "Colle ton token d'API Atlassian\n(id.atlassian.com → Sécurité → Jetons d'API).\n\n(Ctrl+Shift+V pour coller ; rien ne s'affiche, c'est normal)")
+    fi
+    JIRA_PROJECT=$(w_input "Jira" "Clé du projet par défaut (optionnel, ex : PROJ) :" "$JIRA_PROJECT")
+  else
+    JIRA_URL=""; JIRA_EMAIL=""; JIRA_API_TOKEN=""; JIRA_PROJECT=""
+  fi
+
   # --- Remote Control ---
   if w_yesno "Remote Control" "Lancer Claude Code automatiquement en Remote Control au démarrage du conteneur ?"; then
     RC_ENABLE=1
@@ -137,6 +157,7 @@ wizard() {
   # --- Récapitulatif ---
   local tok="aucun"; [ -n "$GH_TOKEN" ] && tok="fourni"
   local rc="non"; [ "$RC_ENABLE" = 1 ] && rc="oui, ~/${RC_DIR} (${RC_SPAWN}, ${RC_PERMISSION_MODE})"
+  local jira="non"; [ -n "$JIRA_URL" ] && jira="${JIRA_URL} (${JIRA_EMAIL}${JIRA_PROJECT:+, projet ${JIRA_PROJECT}})"
   local recap
   recap="Conteneur : ${HOSTNAME_CT}  (ID : ${CTID:-auto}, Debian ${DEBIAN_VERSION})
 Ressources : ${CORES} cœurs, ${RAM_MB} Mo RAM, ${DISK_GB} Go sur ${STORAGE:-auto}
@@ -144,6 +165,7 @@ Réseau : ${BRIDGE}, ${IP_CONF}
 Java : Temurin ${JAVA_VERSION}
 Git : ${GIT_NAME} <${GIT_EMAIL}>
 Token GitHub : ${tok}    Dépôt : ${GH_REPO:-aucun}
+Jira : ${jira}
 Remote Control : ${rc}
 
 Lancer la création ?"
@@ -171,6 +193,12 @@ if [ -z "$RC_DIR" ]; then
   RC_DIR="workspace"; [ -n "$GH_REPO" ] && RC_DIR="workspace/${GH_REPO##*/}"
 fi
 RC_DIR="${RC_DIR#/home/${DEV_USER}/}"; RC_DIR="${RC_DIR#\~/}"
+JIRA_URL="${JIRA_URL%/}"
+if [ -n "${JIRA_URL}${JIRA_EMAIL}${JIRA_API_TOKEN}" ]; then
+  [ -n "$JIRA_URL" ] && [ -n "$JIRA_EMAIL" ] && [ -n "$JIRA_API_TOKEN" ] \
+    || die "Jira : JIRA_URL, JIRA_EMAIL et JIRA_API_TOKEN doivent être renseignés ensemble."
+  [[ "$JIRA_URL" =~ ^https:// ]] || die "Jira : JIRA_URL doit commencer par https:// ('$JIRA_URL')."
+fi
 log "Conteneur ${HOSTNAME_CT} — ID ${CTID} — stockage ${STORAGE}"
 
 # ============================ 1. TEMPLATE ====================================
@@ -321,6 +349,14 @@ export PATH="\$HOME/.local/bin:\$PATH"
 export JAVA_HOME=\$(dirname \$(dirname \$(readlink -f \$(command -v java))))
 export SPRING_DATA_MONGODB_URI="mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PWD}@localhost:27017/?authSource=admin"
 RC
+if [ -n "${JIRA_URL}" ]; then
+cat >> ~/.dev-env <<'RC'
+export JIRA_URL="${JIRA_URL}"
+export JIRA_EMAIL="${JIRA_EMAIL}"
+export JIRA_API_TOKEN="${JIRA_API_TOKEN}"
+export JIRA_PROJECT="${JIRA_PROJECT}"
+RC
+fi
 chmod 600 ~/.dev-env
 grep -q 'dev-env' ~/.bashrc || echo '[ -f ~/.dev-env ] && . ~/.dev-env' >> ~/.bashrc
 
@@ -353,7 +389,30 @@ cat > ~/.claude/CLAUDE.md <<'MD'
 - Ouvrir une PR avec \`gh pr create --fill\`, ne jamais la merger soi-même.
 - Ne jamais committer de secrets (mots de passe, tokens, fichiers .env).
 MD
+
+if [ -n "${JIRA_URL}" ]; then
+cat >> ~/.claude/CLAUDE.md <<'MD'
+
+# Jira
+- Site : ${JIRA_URL} — projet par défaut : ${JIRA_PROJECT:-aucun}.
+- API REST v3 via les variables \`JIRA_URL\`, \`JIRA_EMAIL\`, \`JIRA_API_TOKEN\`, ex. :
+  \`curl -sS -u "\$JIRA_EMAIL:\$JIRA_API_TOKEN" "\$JIRA_URL/rest/api/3/issue/CLE-123" | jq\`
+- Ne jamais afficher, journaliser ni committer \`JIRA_API_TOKEN\`.
+- Lecture libre ; demander confirmation avant de créer, modifier ou commenter un ticket.
+MD
+fi
 EOF
+
+JIRA_STATUS=""
+if [ -n "$JIRA_URL" ]; then
+  log "Vérification de l'accès Jira…"
+  if JIRA_WHO=$(pct exec "$CTID" -- su - "$DEV_USER" -c \
+      'set -o pipefail; . ~/.dev-env && curl -fsS -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_URL/rest/api/3/myself" | jq -er .displayName'); then
+    JIRA_STATUS="OK (${JIRA_WHO})"
+  else
+    JIRA_STATUS="ÉCHEC — vérifier JIRA_URL, JIRA_EMAIL et le token dans ~/.dev-env"
+  fi
+fi
 
 # ========================= 6. REMOTE CONTROL =================================
 if [ "$RC_ENABLE" = "1" ]; then
@@ -429,7 +488,8 @@ cat <<MSG
  MongoDB :        ${MONGO_ROOT_USER} / ${MONGO_ROOT_PWD}   (à noter, affiché une seule fois)
  GitHub CLI :     ${GH_AUTH_STATUS}${CLONE_STATUS:+
  Dépôt :          ${CLONE_STATUS}}${PUBKEY:+
- Clé SSH GitHub : ${PUBKEY}}
+ Clé SSH GitHub : ${PUBKEY}}${JIRA_STATUS:+
+ Jira :           ${JIRA_STATUS}}
 MSG
 
 if [ "$RC_ENABLE" = "1" ]; then cat <<MSG
